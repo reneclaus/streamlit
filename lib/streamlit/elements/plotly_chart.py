@@ -184,6 +184,8 @@ class PlotlyState(TypedDict, total=False):
         dictionary-like object that supports both key and attribute notation.
         The attributes are described by the ``PlotlySelectionState`` dictionary
         schema.
+    on_export: bool
+        Whether the user clicked the export button.
 
     Example
     -------
@@ -208,6 +210,7 @@ class PlotlyState(TypedDict, total=False):
     """
 
     selection: PlotlySelectionState
+    on_export: bool
 
 
 @dataclass
@@ -222,6 +225,7 @@ class PlotlyChartSelectionSerde:
                 "box": [],
                 "lasso": [],
             },
+            "on_export": False,
         }
 
         selection_state = (
@@ -230,8 +234,8 @@ class PlotlyChartSelectionSerde:
             else cast(PlotlyState, AttributeDictionary(json.loads(ui_value)))
         )
 
-        if "selection" not in selection_state:
-            selection_state = empty_selection_state
+        empty_selection_state.update(selection_state)
+        selection_state = empty_selection_state
 
         return cast(PlotlyState, AttributeDictionary(selection_state))
 
@@ -316,6 +320,7 @@ class PlotlyMixin:
             "box",
             "lasso",
         ),
+        on_export: Literal["ignore"] | WidgetCallback = "ignore",
         **kwargs: Any,
     ) -> DeltaGenerator | PlotlyState:
         """Display an interactive Plotly chart.
@@ -489,6 +494,8 @@ class PlotlyMixin:
         # Copy over some kwargs to config dict. Plotly does the same in plot().
         config.setdefault("showLink", kwargs.get("show_link", False))
         config.setdefault("linkText", kwargs.get("link_text", False))
+        if callable(on_export):
+            config["on_export"] = True
 
         plotly_chart_proto.spec = plotly.io.to_json(figure, validate=False)
         plotly_chart_proto.config = json.dumps(config)
@@ -512,19 +519,36 @@ class PlotlyMixin:
             page=ctx.active_script_hash if ctx else None,
         )
 
-        if is_selection_activated:
-            # Selections are activated, treat plotly chart as a widget:
-            plotly_chart_proto.selection_mode.extend(
-                parse_selection_mode(selection_mode)
-            )
+        if is_selection_activated or callable(on_export):
+            if is_selection_activated:
+                # Selections are activated, treat plotly chart as a widget:
+                plotly_chart_proto.selection_mode.extend(
+                    parse_selection_mode(selection_mode)
+                )
 
             serde = PlotlyChartSelectionSerde()
+
+            def _on_change_handler():
+                state = getattr(ctx.session_state, key)
+                if state.on_export:
+                    if callable(on_export):
+                        try:
+                            on_export()
+                        finally:
+                            # So that export is called each time the button is pressed:
+                            state.on_export = False
+                            setattr(ctx.session_state, key, state)
+                else:
+                    if callable(on_select):
+                        on_select()
 
             widget_state = register_widget(
                 "plotly_chart",
                 plotly_chart_proto,
                 user_key=key,
-                on_change_handler=on_select if callable(on_select) else None,
+                on_change_handler=_on_change_handler
+                if callable(on_select) or callable(on_export)
+                else None,
                 deserializer=serde.deserialize,
                 serializer=serde.serialize,
                 ctx=ctx,
